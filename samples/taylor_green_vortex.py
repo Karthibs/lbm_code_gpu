@@ -5,6 +5,7 @@ from cylbm.stencil import Stencil
 from cylbm.lattice import Lattice
 from cylbm.constants import cs
 from cylbm.exporter import Exporter
+import cupy as cp
 
 
 def main():
@@ -13,7 +14,7 @@ def main():
     n = 128
     Ma = 0.1
     Re = 1600
-    L = n/(2 * np.pi)
+    L = n/(2 * cp.pi)
     rho0 = 1.0
     p0 = rho0 * cs**2
     v0 = Ma * cs
@@ -35,12 +36,12 @@ def main():
     stencil = Stencil(d, q)
     lattice = Lattice((n, n, n), stencil)
     # Initial data
-    x, y, z = np.meshgrid(range(n), range(n), range(n), indexing="ij")
-    x = x/L + np.pi/2
-    y = y/L + np.pi/2
-    z = z/L + np.pi/2
-    lattice.u[:, :, :, 0] = +v0 * np.sin(x) * np.cos(y) * np.sin(z)
-    lattice.u[:, :, :, 1] = -v0 * np.cos(x) * np.sin(y) * np.sin(z)
+    x, y, z = cp.meshgrid(cp.arange(n), cp.arange(n), cp.arange(n), indexing="ij")
+    x = x/L + cp.pi/2
+    y = y/L + cp.pi/2
+    z = z/L + cp.pi/2
+    lattice.u[:, :, :, 0] = +v0 * cp.sin(x) * cp.cos(y) * cp.sin(z)
+    lattice.u[:, :, :, 1] = -v0 * cp.cos(x) * cp.sin(y) * cp.sin(z)
     lattice.u[:, :, :, 2] = 0
     lattice.rho[:] = p0 / cs**2
     lattice.init_data()
@@ -57,7 +58,7 @@ def main():
         print(it + 1)
         lattice.collision(omega)
         lattice.streaming()
-        if np.mod(it + 1, mod_it) == 0:
+        if cp.mod(it + 1, mod_it) == 0:
             filename = f"tgv-{it + 1}.vtk"
             # exporter.write_vtk(filename, {"density": lattice.rho, "velocity": lattice.u})
             print(f"Time: {time.perf_counter() - t0}")

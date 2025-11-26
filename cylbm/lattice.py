@@ -1,84 +1,131 @@
-import cupy as cp
-import numpy as np  # Keep numpy for printing or specific host operations if needed
+import numpy as np
 from cylbm.constants import cs, inv_cs2, inv_cs4
 from cylbm.stencil import Stencil
+import cupy as cp
+
 
 class Lattice:
     def __init__(self, n, stencil: Stencil):
         self.stencil = stencil
-        # [Reference 1]: Initialize arrays directly on the Device (GPU)
+        self.n = n
         self.f = cp.zeros((n + (stencil.q,)), dtype=cp.float64)
+        self.f_tmp = cp.zeros_like(self.f)  # Pre-allocate buffer for streaming
         self.u = cp.zeros((n + (stencil.d,)), dtype=cp.float64)
         self.rho = cp.ones(n, dtype=cp.float64)
         self.gamma = 1.4
         
-        # Move stencil constants to GPU once to avoid repeated transfers
-        # [Reference 2]: cp.asarray moves data from Host to Device
-        self.c_gpu = cp.asarray(self.stencil.c)
-        self.w_gpu = cp.asarray(self.stencil.w)
+        # Pre-compute stencil arrays on GPU (cast to float for einsum)
+        self.c_float = self.stencil.c.astype(cp.float64)
+        self.w = self.stencil.w
+        
+        # Pre-compute streaming indices for faster streaming (avoid cp.roll)
+        self._precompute_streaming_indices()
+
+    def _precompute_streaming_indices(self):
+        """Pre-compute indices for streaming to avoid cp.roll calls"""
+        d = self.stencil.d
+        n = self.n
+        c = cp.asnumpy(self.stencil.c)  # Get numpy array for indexing computation
+        
+        if d == 2:
+            nx, ny = n
+            # Create base indices
+            ix = np.arange(nx)
+            iy = np.arange(ny)
+            self.src_indices = []
+            for iq in range(self.stencil.q):
+                cx, cy = c[iq]
+                src_x = (ix - cx) % nx
+                src_y = (iy - cy) % ny
+                self.src_indices.append((cp.asarray(src_x), cp.asarray(src_y)))
+        elif d == 3:
+            nx, ny, nz = n
+            ix = np.arange(nx)
+            iy = np.arange(ny)
+            iz = np.arange(nz)
+            self.src_indices = []
+            for iq in range(self.stencil.q):
+                cx, cy, cz = c[iq]
+                src_x = (ix - cx) % nx
+                src_y = (iy - cy) % ny
+                src_z = (iz - cz) % nz
+                self.src_indices.append((cp.asarray(src_x), cp.asarray(src_y), cp.asarray(src_z)))
 
     def init_data(self):
         self.f = self.feq()
+        self.f_tmp = cp.zeros_like(self.f)
 
     def print_f(self):
-        # Move to CPU for printing
-        f_cpu = cp.asnumpy(self.f) 
         if self.stencil.d == 2:
-            for j in range(f_cpu.shape[1]):
-                for i in range(f_cpu.shape[0]):
-                    ff = [f"{f_cpu[i, j, iq]}" for iq in range(self.stencil.q)]
+            for j in range(self.f.shape[1]):
+                for i in range(self.f.shape[0]):
+                    ff = [f"{self.f[i, j, iq]}" for iq in range(self.stencil.q)]
                     print(f"[{i}, {j}] {ff}")
         elif self.stencil.d == 3:
-            for k in range(f_cpu.shape[2]):
-                for j in range(f_cpu.shape[1]):
-                    for i in range(f_cpu.shape[0]):
-                        ff = [f"{f_cpu[i, j, k, iq]}" for iq in range(self.stencil.q)]
+            for k in range(self.f.shape[2]):
+                for j in range(self.f.shape[1]):
+                    for i in range(self.f.shape[0]):
+                        ff = [f"{self.f[i, j, k, iq]}" for iq in range(self.stencil.q)]
                         print(f"[{i}, {j}, {k}] {ff}")
 
     def streaming(self):
-        axis = tuple([i for i in range(self.stencil.d)])
-        idx = (slice(None),) * self.stencil.d
+        """Optimized streaming using pre-computed indices"""
+        d = self.stencil.d
         
-        # [Reference 3]: cp.roll performs the shift on the GPU. 
-        # Note: For very high performance, a custom kernel is preferred over roll, 
-        # but cp.roll is the direct, correct equivalent here.
-        for iq in range(self.stencil.q):
-            # We must use self.stencil.c (CPU) for the shift amount integer, 
-            # as roll expects a host scalar for the shift magnitude.
-            shift = tuple(self.stencil.c[iq])
-            self.f[idx + (iq,)] = cp.roll(self.f[idx + (iq,)], shift, axis=axis)
+        if d == 2:
+            for iq in range(self.stencil.q):
+                src_x, src_y = self.src_indices[iq]
+                self.f_tmp[:, :, iq] = self.f[src_x[:, None], src_y[None, :], iq]
+        elif d == 3:
+            for iq in range(self.stencil.q):
+                src_x, src_y, src_z = self.src_indices[iq]
+                self.f_tmp[:, :, :, iq] = self.f[src_x[:, None, None], src_y[None, :, None], src_z[None, None, :], iq]
+        
+        # Swap buffers
+        self.f, self.f_tmp = self.f_tmp, self.f
 
     def density(self):
-        # [Reference 4]: Reduction operation on GPU
-        self.rho = cp.sum(self.f, axis=self.f.ndim-1)
+        """Optimized density calculation - already vectorized"""
+        self.rho = cp.sum(self.f, axis=-1)
 
     def velocity(self):
-        idx = (slice(None),) * self.stencil.d
-        # We calculate momentum and divide by rho
-        # Using tensordot or manual loop. Keeping loop for clarity with original structure.
-        for i in range(self.stencil.d):
-            # Use the GPU-resident c_gpu
-            self.u[idx + (i,)] = cp.dot(self.f[idx], self.c_gpu[:, i]) / self.rho
+        """Optimized velocity calculation using einsum"""
+        # f shape: (nx, ny, [nz,] q), c_float shape: (q, d)
+        # Result shape: (nx, ny, [nz,] d)
+        if self.stencil.d == 2:
+            # einsum: sum over q dimension, output (nx, ny, d)
+            self.u = cp.einsum('ijq,qd->ijd', self.f, self.c_float) / self.rho[..., None]
+        elif self.stencil.d == 3:
+            # einsum: sum over q dimension, output (nx, ny, nz, d)
+            self.u = cp.einsum('ijkq,qd->ijkd', self.f, self.c_float) / self.rho[..., None]
 
     def collision(self, omega):
+        """Collision step with fused equilibrium calculation"""
         self.density()
         self.velocity()
-        # Element-wise operations are automatically fused and parallelized by CuPy
-        self.f -= omega * (self.f - self.feq())
+        feq = self._feq_vectorized()
+        self.f -= omega * (self.f - feq)
 
     def feq(self):
-        idx = (slice(None),) * self.stencil.d
-        feq = cp.zeros_like(self.f)
+        """Public interface for equilibrium distribution"""
+        return self._feq_vectorized()
+
+    def _feq_vectorized(self):
+        """Fully vectorized equilibrium distribution calculation"""
+        # u shape: (nx, ny, [nz,] d), c_float shape: (q, d)
+        # uc shape: (nx, ny, [nz,] q) - dot product of u with each velocity
+        if self.stencil.d == 2:
+            uc = cp.einsum('ijd,qd->ijq', self.u, self.c_float)
+        elif self.stencil.d == 3:
+            uc = cp.einsum('ijkd,qd->ijkq', self.u, self.c_float)
         
-        # Sum of u^2
-        uu = cp.sum(self.u**2, axis=self.f.ndim-1)
+        # uu: velocity magnitude squared, shape (nx, ny, [nz,])
+        uu = cp.sum(self.u**2, axis=-1)
         
-        # Iterate over GPU resident constants
-        # Note: We iterate 'range' on CPU, but operations inside are GPU
-        for iq in range(self.stencil.q):
-            c_i = self.c_gpu[iq]
-            w_i = self.w_gpu[iq]
-            
-            uc = cp.dot(self.u[idx], c_i)
-            feq[idx + (iq,)] = w_i * self.rho * (1.0 + inv_cs2 * uc + 0.5 * inv_cs4 * uc**2 - 0.5 * inv_cs2 * uu)
+        # Vectorized feq calculation
+        # w shape: (q,), broadcast to match feq shape
+        # rho shape: (nx, ny, [nz,]), broadcast with [None] for q dimension
+        feq = self.w * self.rho[..., None] * (
+            1.0 + inv_cs2 * uc + 0.5 * inv_cs4 * uc**2 - 0.5 * inv_cs2 * uu[..., None]
+        )
         return feq
