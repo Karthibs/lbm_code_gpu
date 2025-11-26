@@ -1,7 +1,7 @@
 #Defines physical constants like the speed of sound
 
 import numpy as np
-# import cupy as cp
+import cupy as cp
 
 cs = np.float32(1.0 / np.sqrt(3))
 cs2 = np.float32(1.0/3.0)
