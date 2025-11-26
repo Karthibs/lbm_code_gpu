@@ -1,0 +1,22 @@
+# --- Operating System Files (Junk) ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- VS Code Settings (Optional) ---
+.vscode/
+
+# --- Python ---
+__pycache__/
+*.pyc
+
+# --- C++ / Compiled Code ---
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.out
+dist/
+build/
+venv/
