@@ -1,8 +1,8 @@
 # This is the main engine of the simulation. IIt manages the particle distribution functions
 
-# import numpy as np
+import numpy as np
 import numba as nb
-import cupy as np
+# import cupy as np
 from lbm.constants import cs, inv_cs2, inv_cs4
 from lbm.stencil import Stencil
 

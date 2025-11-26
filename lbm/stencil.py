@@ -1,8 +1,8 @@
 #Defines the discrete velocity sets. It currently supports D2Q9 (2D, 9 velocities) and D3Q19 (3D, 19 velocities).
 #the directions in which fluid particles can move on a lattice grid.
 
-# import numpy as np
-import cupy as np
+import numpy as np
+# import cupy as np
 
 
 

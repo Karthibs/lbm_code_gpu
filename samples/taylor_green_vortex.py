@@ -2,8 +2,8 @@
 
 import sys
 import time
-# import numpy as np
-import cupy as np
+import numpy as np
+# import cupy as np
 from lbm.stencil import Stencil
 from lbm.lattice import Lattice
 from lbm.constants import cs
