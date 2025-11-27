@@ -1,6 +1,20 @@
 import numpy as np
 
 
+try:
+    import cupy as cp
+    HAS_CUPY = True
+except ImportError:
+    HAS_CUPY = False
+
+
+def to_numpy(arr):
+    """Convert CuPy array to NumPy, or return NumPy array as-is."""
+    if HAS_CUPY and isinstance(arr, cp.ndarray):
+        return cp.asnumpy(arr)
+    return arr
+
+
 class Exporter:
     def __init__(self, n):
         self.n = n
@@ -108,18 +122,22 @@ class Exporter:
         file_id.write(f"{self.num_cells}".encode("ascii"))
         file_id.write(b"\n")
 
+        # Convert CuPy arrays to NumPy if needed
+        density = to_numpy(data["density"])
+        velocity = to_numpy(data["velocity"])
+
         file_id.write(b"SCALARS density float 1\nLOOKUP_TABLE default\n")
         if np.little_endian:
-            data["density"].flatten().astype(np.float32).byteswap().tofile(file_id, sep="")
+            density.flatten().astype(np.float32).byteswap().tofile(file_id, sep="")
         else:
-            data["density"].flatten().astype(np.float32).tofile(file_id, sep="")
+            density.flatten().astype(np.float32).tofile(file_id, sep="")
         file_id.write(b"\n")
 
         file_id.write(b"VECTORS velocity float\n")
         if len(self.n) == 2:
-            data["velocity"] = np.pad(data["velocity"], ((0, 0), (0, 0), (0, 1)), mode="constant")
+            velocity = np.pad(velocity, ((0, 0), (0, 0), (0, 1)), mode="constant")
         if np.little_endian:
-            data["velocity"].flatten().astype(np.float32).byteswap().tofile(file_id, sep="")
+            velocity.flatten().astype(np.float32).byteswap().tofile(file_id, sep="")
         else:
-            data["velocity"].flatten().astype(np.float32).tofile(file_id, sep="")
+            velocity.flatten().astype(np.float32).tofile(file_id, sep="")
         file_id.write(b"\n")
